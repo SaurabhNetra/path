@@ -6,6 +6,8 @@
 #include <unistd.h>
 #include <omp.h>
 #include "mt19937p.h"
+#include <time.h>
+#include <mpi.h>
 
 //ldoc on
 /**
@@ -41,13 +43,21 @@
 
 int square(int n,               // Number of nodes
            int* restrict l,     // Partial distance at step s
-           int* restrict lnew)  // Partial distance at step s+1
+           int* restrict lnew,   // Partial distance at step s+1
+           int nprocx,int nprocy,int irank)
 {
     int done = 1;
-    #pragma omp parallel for shared(l, lnew) reduction(&& : done)
-    for (int j = 0; j < n; ++j) {
-        for (int i = 0; i < n; ++i) {
-            int lij = lnew[j*n+i];
+
+    int nx = n/nprocx;
+    int ny = n/nprocy;
+    int irankx = irank % nprocx;
+    int iranky = irank / nprocx;
+
+//    #pragma omp parallel for shared(l, lnew) reduction(&& : done)
+    int count = 0;
+    for (int j = iranky*ny; j < (iranky+1)*ny; ++j) {
+        for (int i = irankx*nx; i < (irankx+1)*nx; ++i) {
+            int lij = lnew[count];
             for (int k = 0; k < n; ++k) {
                 int lik = l[k*n+i];
                 int lkj = l[j*n+k];
@@ -56,7 +66,8 @@ int square(int n,               // Number of nodes
                     done = 0;
                 }
             }
-            lnew[j*n+i] = lij;
+            lnew[count] = lij;
+            count++;
         }
     }
     return done;
@@ -104,21 +115,57 @@ static inline void deinfinitize(int n, int* l)
  * same (as indicated by the return value of the `square` routine).
  */
 
-void shortest_paths(int n, int* restrict l)
+void shortest_paths(int n, int* restrict l,int nprocx,int nprocy,int irank)
 {
+    
+    int nx = n/nprocx;
+    int ny = n/nprocy;
+    int irankx = irank % nprocx;
+    int iranky = irank / nprocx;
+
+    int rankx;
+    int ranky;
+    int done;
     // Generate l_{ij}^0 from adjacency matrix representation
     infinitize(n, l);
     for (int i = 0; i < n*n; i += n+1)
         l[i] = 0;
 
     // Repeated squaring until nothing changes
-    int* restrict lnew = (int*) calloc(n*n, sizeof(int));
-    memcpy(lnew, l, n*n * sizeof(int));
-    for (int done = 0; !done; ) {
-        done = square(n, l, lnew);
-        memcpy(l, lnew, n*n * sizeof(int));
+    int* restrict lnew = (int*) calloc(nx*ny, sizeof(int));
+    int* restrict lnew2 = (int*) malloc(n*n*sizeof(int));
+
+
+
+
+    for (int done2 = 0; !done2; ) {
+
+        int count = 0;
+        for (int j = iranky*ny; j < (iranky+1)*ny; ++j)
+            for (int i = irankx*nx; i < (irankx+1)*nx; ++i){
+                lnew[count]=l[j*n+i];
+                count++;
+            }
+
+        done = square(n, l, lnew,nprocx,nprocy,irank);
+        MPI_Allgather(lnew,nx*ny,MPI_INT,lnew2,nx*ny,MPI_INT,MPI_COMM_WORLD);
+        MPI_Allreduce(&done,&done2,1,MPI_INT,MPI_MAX,MPI_COMM_WORLD);
+        count = 0;
+        for (int proci = 0; proci < nprocx*nprocy; proci++){
+            rankx = proci % nprocx;
+            ranky = proci / nprocx;
+            for (int j = ranky*ny; j < (ranky+1)*ny; ++j)
+                for (int i = rankx*nx; i < (rankx+1)*nx; ++i){
+                    l[j*n+i]=lnew2[count];
+                    count++;
+                }
+        }
+        
+
     }
+
     free(lnew);
+    free(lnew2);
     deinfinitize(n, l);
 }
 
@@ -208,6 +255,13 @@ int main(int argc, char** argv)
     const char* ifname = NULL; // Adjacency matrix file name
     const char* ofname = NULL; // Distance matrix file name
 
+    int ierr,irank,nprocx,nprocy;
+    ierr = MPI_Init(&argc, &argv);
+    ierr = MPI_Comm_rank(MPI_COMM_WORLD,&irank);
+
+    nprocx=10;
+    nprocy=1;
+
     // Option processing
     extern char* optarg;
     const char* optstring = "hn:d:p:o:i:";
@@ -224,6 +278,8 @@ int main(int argc, char** argv)
         }
     }
 
+    
+
     // Graph generation + output
     int* l = gen_graph(n, p);
     if (ifname)
@@ -231,20 +287,25 @@ int main(int argc, char** argv)
 
     // Time the shortest paths code
     double t0 = omp_get_wtime();
-    shortest_paths(n, l);
+    shortest_paths(n, l,nprocx,nprocy,irank);
     double t1 = omp_get_wtime();
 
-    printf("== OpenMP with %d threads\n", omp_get_max_threads());
-    printf("n:     %d\n", n);
-    printf("p:     %g\n", p);
-    printf("Time:  %g\n", t1-t0);
-    printf("Check: %X\n", fletcher16(l, n*n));
-
-    // Generate output file
-    if (ofname)
-        write_matrix(ofname, n, l);
+    if (irank==0)
+    {
+    //    printf("== OpenMP with %d threads\n", omp_get_max_threads());
+        printf("n:     %d\n", n);
+        printf("p:     %g\n", p);
+        printf("Time:  %g\n", t1-t0);
+        printf("Check: %X\n", fletcher16(l, n*n));
+    
+        // Generate output file
+        if (ofname)
+            write_matrix(ofname, n, l);
+    }
 
     // Clean up
     free(l);
+    ierr = MPI_Finalize();
     return 0;
 }
+
