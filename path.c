@@ -39,7 +39,7 @@
  * identical, and false otherwise.
  */
 
-int square(int n,               // Number of nodes
+int __attribute__((target(mic))) square(int n,               // Number of nodes
            int* restrict l,     // Partial distance at step s
            int* restrict lnew)  // Partial distance at step s+1
 {
@@ -85,14 +85,14 @@ int square(int n,               // Number of nodes
  * conventions.
  */
 
-static inline void infinitize(int n, int* l)
+static inline void __attribute__((target(mic))) infinitize(int n, int* l)
 {
     for (int i = 0; i < n*n; ++i)
         if (l[i] == 0 && i % (n + 1) != 0)
             l[i] = n+1;
 }
 
-static inline void deinfinitize(int n, int* l)
+static inline void __attribute__((target(mic))) deinfinitize(int n, int* l)
 {
     for (int i = 0; i < n*n; ++i)
         if (l[i] == n+1)
@@ -113,22 +113,26 @@ static inline void deinfinitize(int n, int* l)
  * same (as indicated by the return value of the `square` routine).
  */
 
-void shortest_paths(int n, int* restrict l)
+void __attribute__((target(mic))) shortest_paths(int n, int* restrict l)
 {
-    // Generate l_{ij}^0 from adjacency matrix representation
-    infinitize(n, l);
-    // Repeated squaring until nothing changes
-    int* restrict lnew = (int*) calloc(n*n, sizeof(int));
-    int flag = 1;
-    for (int done = 0; !done; ) {
-        done = flag ? square(n, l, lnew) : square(n, lnew, l);
-        flag = !flag;
+    #pragma offload target(mic) \
+    inout(l : length(n*n))
+    {
+      // Generate l_{ij}^0 from adjacency matrix representation
+      infinitize(n, l);
+      // Repeated squaring until nothing changes
+      int* restrict lnew = (int*) calloc(n*n, sizeof(int));
+      int flag = 1;
+      for (int done = 0; !done; ) {
+          done = flag ? square(n, l, lnew) : square(n, lnew, l);
+          flag = !flag;
+      }
+      if(!flag) {
+          memcpy(l, lnew, n*n * sizeof(int));
+      }
+      free(lnew);
+      deinfinitize(n, l);
     }
-    if(!flag) {
-        memcpy(l, lnew, n*n * sizeof(int));
-    }
-    free(lnew);
-    deinfinitize(n, l);
 }
 
 /**
@@ -172,7 +176,7 @@ int* gen_graph(int n, double p)
  * [wiki-fletcher]: http://en.wikipedia.org/wiki/Fletcher's_checksum
  */
 
-int fletcher16(int* data, int count)
+int __attribute__((target(mic))) fletcher16(int* data, int count)
 {
     int sum1 = 0;
     int sum2 = 0;
@@ -217,6 +221,7 @@ int main(int argc, char** argv)
     const char* ifname = NULL; // Adjacency matrix file name
     const char* ofname = NULL; // Distance matrix file name
 
+    
     // Option processing
     extern char* optarg;
     const char* optstring = "hn:d:p:o:i:";
